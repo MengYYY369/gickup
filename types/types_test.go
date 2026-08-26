@@ -38,6 +38,13 @@ func TestParseInvalidCron(t *testing.T) {
 	}
 }
 
+func TestWebhookConfigDefaults(t *testing.T) {
+	conf := Conf{}
+	if conf.Webhook.Enabled {
+		t.Fatal("webhook must be disabled by default")
+	}
+}
+
 func TestDestinationCount(t *testing.T) {
 	t.Parallel()
 

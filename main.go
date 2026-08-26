@@ -35,6 +35,7 @@ import (
 	"github.com/cooperspencer/gickup/sourcehut"
 	"github.com/cooperspencer/gickup/types"
 	"github.com/cooperspencer/gickup/webdav"
+	"github.com/cooperspencer/gickup/webhook"
 	"github.com/cooperspencer/gickup/whatever"
 	"github.com/cooperspencer/gickup/zip"
 	"github.com/go-git/go-git/v5"
@@ -1070,6 +1071,14 @@ func backup(repos []types.Repo, conf *types.Conf) {
 	}
 }
 
+func runGithubBackup(conf *types.Conf, num int) {
+	repos, ran := github.Get(conf)
+	if ran {
+		prometheus.CountReposDiscovered.WithLabelValues("github", strconv.Itoa(num)).Set(float64(len(repos)))
+	}
+	backup(repos, conf)
+}
+
 func runBackup(conf *types.Conf, num int) {
 	log.Info().Msg("Backup run starting")
 
@@ -1082,14 +1091,10 @@ func runBackup(conf *types.Conf, num int) {
 	httpclient.ApplyGickupUserAgent()
 
 	// Github
-	repos, ran := github.Get(conf)
-	if ran {
-		prometheus.CountReposDiscovered.WithLabelValues("github", numstring).Set(float64(len(repos)))
-	}
-	backup(repos, conf)
+	runGithubBackup(conf, num)
 
 	// Gitea
-	repos, ran = gitea.Get(conf)
+	repos, ran := gitea.Get(conf)
 	if ran {
 		prometheus.CountReposDiscovered.WithLabelValues("gitea", numstring).Set(float64(len(repos)))
 	}
@@ -1219,14 +1224,55 @@ func playsForever(c *cron.Cron, conffiles []string, confs []*types.Conf) bool {
 		if !cmp.Equal(confs, checkconfigs) {
 			log.Info().Msg("config changed")
 			log.Debug().Msg(cmp.Diff(confs, checkconfigs))
-			for _, entry := range c.Entries() {
-				c.Remove(entry.ID)
+			if c != nil {
+				for _, entry := range c.Entries() {
+					c.Remove(entry.ID)
+				}
 			}
 			return true
 		}
 
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func hasLongRunningService(confs []*types.Conf) bool {
+	for _, conf := range confs {
+		if conf.HasValidCronSpec() || conf.Webhook.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func startWebhookService(confs []*types.Conf) (*webhook.Service, error) {
+	var config *types.WebhookConfig
+	for _, conf := range confs {
+		if !conf.Webhook.Enabled {
+			continue
+		}
+		if config != nil && !reflect.DeepEqual(*config, conf.Webhook) {
+			return nil, fmt.Errorf("all enabled webhook configurations must use the same service settings")
+		}
+		current := conf.Webhook
+		config = &current
+	}
+	if config == nil {
+		return nil, nil
+	}
+	service, err := webhook.NewService(*config, confs, func(conf *types.Conf) error {
+		runGithubBackup(conf, 0)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := service.Start(); err != nil {
+			log.Error().Err(err).Msg("GitHub webhook listener stopped")
+		}
+	}()
+	return service, nil
 }
 
 func main() {
@@ -1301,6 +1347,11 @@ func main() {
 			c.Start()
 		}
 
+		webhookService, err := startWebhookService(confs)
+		if err != nil {
+			log.Fatal().Err(err).Msg("could not start GitHub webhook service")
+		}
+
 		sourcecount := 0
 		destinationcount := 0
 		// one pair per source-destination
@@ -1339,7 +1390,7 @@ func main() {
 			}
 		}
 
-		if validcron {
+		if hasLongRunningService(confs) {
 			if confs[0].HasAllPrometheusConf() {
 				prometheus.CountSourcesConfigured.Add(float64(sourcecount))
 				prometheus.CountDestinationsConfigured.Add(float64(destinationcount))
@@ -1349,6 +1400,14 @@ func main() {
 				}
 			}
 			reload = playsForever(c, cli.Configfiles, confs)
+			if webhookService != nil {
+				if err := webhookService.Stop(); err != nil {
+					log.Warn().Err(err).Msg("GitHub webhook service shutdown failed")
+				}
+			}
+			if c != nil {
+				c.Stop()
+			}
 			log.Info().Msg("reloading config...")
 		}
 		if !reload {
