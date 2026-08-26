@@ -40,6 +40,21 @@ var JobDuration = promauto.NewSummary(prometheus.SummaryOpts{
 	Help: "The duration of scheduled jobs started since process startup",
 })
 
+var WebhookDeliveries = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "gickup_webhook_deliveries_total",
+	Help: "GitHub webhook deliveries by outcome",
+}, []string{"outcome"})
+
+var WebhookQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "gickup_webhook_queue_depth",
+	Help: "Number of queued GitHub webhook synchronization jobs",
+})
+
+var WebhookSyncs = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "gickup_webhook_syncs_total",
+	Help: "GitHub webhook synchronization jobs by outcome",
+}, []string{"outcome"})
+
 var SourceBackupsComplete = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "gickup_sources_complete",
 	Help: "The count of source backups completed",

@@ -75,11 +75,20 @@ type Local struct {
 
 // Conf TODO.
 type Conf struct {
-	Source      Source      `yaml:"source"`
-	Destination Destination `yaml:"destination"`
-	Cron        string      `yaml:"cron"`
-	Log         Logging     `yaml:"log"`
-	Metrics     Metrics     `yaml:"metrics"`
+	Source      Source        `yaml:"source"`
+	Destination Destination   `yaml:"destination"`
+	Cron        string        `yaml:"cron"`
+	Log         Logging       `yaml:"log"`
+	Metrics     Metrics       `yaml:"metrics"`
+	Webhook     WebhookConfig `yaml:"webhook"`
+}
+
+type WebhookConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	ListenAddr    string `yaml:"listen_addr"`
+	Path          string `yaml:"path"`
+	Secret        string `yaml:"secret"`
+	QueueCapacity int    `yaml:"queue_capacity"`
 }
 
 // PrometheusConfig TODO.

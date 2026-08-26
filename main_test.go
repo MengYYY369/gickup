@@ -4,7 +4,23 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/cooperspencer/gickup/types"
 )
+
+func TestWebhookKeepsApplicationRunningWithoutCron(t *testing.T) {
+	confs := []*types.Conf{{Webhook: types.WebhookConfig{Enabled: true}}}
+	if !hasLongRunningService(confs) {
+		t.Fatal("enabled webhook should keep application running")
+	}
+}
+
+func TestNoCronOrWebhookKeepsOneShotBehavior(t *testing.T) {
+	confs := []*types.Conf{{}}
+	if hasLongRunningService(confs) {
+		t.Fatal("configuration without cron or webhook should remain one-shot")
+	}
+}
 
 func TestTildeReplacement_NoAction(t *testing.T) {
 	t.Parallel()
