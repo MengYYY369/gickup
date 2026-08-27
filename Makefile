@@ -2,11 +2,15 @@ test:
 	go test ./...
 .PHONY: test
 
+webui:
+	cd webui && npm ci && npm run build
+.PHONY: webui
+
 dist:
 	mkdir -p dist
 
-dist/gickup: dist
-	go build -o dist/gickup ./main.go
+dist/gickup: dist webui
+	go build -o dist/gickup .
 
 build: dist/gickup
 .PHONY: build

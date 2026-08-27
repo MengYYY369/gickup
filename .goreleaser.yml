@@ -1,5 +1,11 @@
 version: 2
 
+before:
+  hooks:
+    - npm ci --prefix webui
+    - npm run build --prefix webui
+    - go test ./...
+
 builds:
   - goos:
       - freebsd

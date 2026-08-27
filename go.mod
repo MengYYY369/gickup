@@ -81,6 +81,7 @@ require (
 	github.com/prometheus/common v0.68.0 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shurcooL/graphql v0.0.0-20240915155400-7ee5256398cf // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect

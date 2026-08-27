@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: npm ci
+        working-directory: webui
+      - run: npm test
+        working-directory: webui
+      - run: npx playwright install --with-deps chromium
+        working-directory: webui
+      - run: npm run test:e2e
+        working-directory: webui
+      - run: npm run build
+        working-directory: webui
+      - run: go test ./...
+      - run: go build -o gickup .
+      - run: go test -run 'Test(EmbeddedExampleDocumentsValidateAgainstJSONSchema|EmbeddedConfigContractMatchesWorkingFiles)$' .
+      - name: Verify embedded WebUI release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="$(mktemp -d)"
+          ./gickup webui --port 6175 --config-dir "$config_dir" >webui.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$config_dir"' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:6175/ >index.html; then
+              break
+            fi
+            sleep 1
+          done
+          test -s index.html
+
+          grep -Eo '/assets/[^" ]+\.(js|css)' index.html | sort -u >assets.txt
+          test "$(wc -l <assets.txt)" -ge 2
+          while IFS= read -r asset; do
+            curl --fail --silent "http://127.0.0.1:6175${asset}" -o asset.out
+            test -s asset.out
+          done <assets.txt
+
+          curl --fail --silent http://127.0.0.1:6175/api/v1/configs | grep -q '"configs"'
+          curl --fail --silent \
+            -H 'Content-Type: application/json' \
+            -d '{"Name":"release-example.yml","Template":"example"}' \
+            http://127.0.0.1:6175/api/v1/configs
+          curl --fail --silent http://127.0.0.1:6175/api/v1/configs/release-example.yml >opened.json
+          grep -q '"schema"' opened.json
+          grep -q '"documents"' opened.json
+      - run: ./gickup --version
