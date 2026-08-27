@@ -15,6 +15,9 @@
         "metrics": {
             "$ref": "#/definitions/metrics"
         },
+        "webhook": {
+            "$ref": "#/definitions/webhook"
+        },
         "source": {
             "type": "object",
             "description": "Configuration for all git hoster source endpoints",
@@ -479,11 +482,11 @@
                                 "$ref": "#/definitions/source/properties/sshkey"
                             }
                         },
-                        "additionalProperties": false
-                    },
-                    "required": [
-                        "url"
-                    ]
+                        "additionalProperties": false,
+                        "required": [
+                            "url"
+                        ]
+                    }
                 }
             }
         },
@@ -519,7 +522,8 @@
                             },
                             "mirror": {
                                 "type": "boolean",
-                                "description": "clone the repository as a mirror repository"
+                                "default": false,
+                                "description": "clone the repository as a mirror repository. Default: false"
                             },
                             "lfs": {
                                 "type": "boolean",
@@ -551,7 +555,8 @@
                             },
                             "use_static_creds": {
                                 "type": "boolean",
-                                "description": "If true, use static credentials (accesskey/secretkey/token). If false, use IAM instance credentials (e.g. for AWS EC2/ECS). Default: false"
+                                "default": true,
+                                "description": "If true, use static credentials (accesskey/secretkey/token). If false, use IAM instance credentials (e.g. for AWS EC2/ECS). Default: true"
                             },
                             "accesskey": {
                                 "type": "string",
@@ -699,6 +704,9 @@
                             },
                             "force": {
                                 "$ref": "#/definitions/destination/properties/force"
+                            },
+                            "mirrorinterval": {
+                                "$ref": "#/definitions/mirror/properties/mirrorinterval"
                             },
                             "mirror": {
                                 "$ref": "#/definitions/mirror"
@@ -1238,6 +1246,34 @@
                         }
                     },
                     "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        },
+        "webhook": {
+            "$id": "#/definitions/webhook",
+            "type": "object",
+            "description": "Configure the GitHub webhook service (optional)",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable the GitHub webhook service"
+                },
+                "listen_addr": {
+                    "type": "string",
+                    "description": "The address for the webhook service to listen on"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The HTTP path for GitHub webhook requests"
+                },
+                "secret": {
+                    "type": "string",
+                    "description": "The secret used to verify GitHub webhook signatures"
+                },
+                "queue_capacity": {
+                    "type": "integer",
+                    "description": "The maximum number of webhook jobs queued for processing"
                 }
             },
             "additionalProperties": false

@@ -2,11 +2,71 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/cooperspencer/gickup/types"
 )
+
+func TestParseCLIKeepsHeadlessPositionalConfig(t *testing.T) {
+	parsed, err := parseCLI([]string{"custom.yml", "--dryrun"})
+	if err != nil {
+		t.Fatalf("parse headless CLI: %v", err)
+	}
+	if parsed.WebUI != nil {
+		t.Fatal("headless CLI unexpectedly selected WebUI")
+	}
+	if len(parsed.Configfiles) != 1 || parsed.Configfiles[0] != "custom.yml" {
+		t.Fatalf("config files = %#v, want custom.yml", parsed.Configfiles)
+	}
+	if !parsed.Dry {
+		t.Fatal("dry-run flag was not parsed")
+	}
+}
+
+func TestParseCLISelectsWebUIWithoutKongBranchingPanic(t *testing.T) {
+	parsed, err := parseCLI([]string{"webui", "--port", "7000", "--config-dir", "configs"})
+	if err != nil {
+		t.Fatalf("parse WebUI CLI: %v", err)
+	}
+	if parsed.WebUI == nil {
+		t.Fatal("WebUI command was not selected")
+	}
+	if parsed.WebUI.Port != 7000 || parsed.WebUI.ConfigDir != "configs" {
+		t.Fatalf("WebUI options = %#v", parsed.WebUI)
+	}
+}
+
+func TestParseCLIHandlesMultiplePositionalConfigsAndGlobalOptions(t *testing.T) {
+	parsed, err := parseCLI([]string{"one.yml", "two.yaml", "--debug", "--quiet", "--silent"})
+	if err != nil {
+		t.Fatalf("parse headless CLI: %v", err)
+	}
+	if parsed.WebUI != nil {
+		t.Fatal("headless CLI unexpectedly selected WebUI")
+	}
+	want := []string{"one.yml", "two.yaml"}
+	if !reflect.DeepEqual(parsed.Configfiles, want) {
+		t.Fatalf("config files = %#v, want %#v", parsed.Configfiles, want)
+	}
+	if !parsed.Debug || !parsed.Quiet || !parsed.Silent {
+		t.Fatalf("global options were not preserved: %#v", parsed)
+	}
+}
+
+func TestParseCLIVersionRemainsAHeadlessGlobalOption(t *testing.T) {
+	parsed, err := parseCLI([]string{"--version"})
+	if err != nil {
+		t.Fatalf("parse version CLI: %v", err)
+	}
+	if !parsed.Version {
+		t.Fatal("version flag was not parsed")
+	}
+	if parsed.WebUI != nil {
+		t.Fatal("version flag unexpectedly selected WebUI")
+	}
+}
 
 func TestWebhookKeepsApplicationRunningWithoutCron(t *testing.T) {
 	confs := []*types.Conf{{Webhook: types.WebhookConfig{Enabled: true}}}

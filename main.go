@@ -46,13 +46,44 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var cli struct {
+type webUIOptions struct {
+	Port      int    `help:"Port for the WebUI." default:"6175"`
+	ConfigDir string `help:"Directory containing configuration files." default:"."`
+}
+
+type cliOptions struct {
 	Configfiles []string `arg name:"conf" help:"Path to the configfile." default:"conf.yml"`
-	Version     bool     `flag name:"version" help:"Show version."`
-	Dry         bool     `flag name:"dryrun" help:"Make a dry-run."`
-	Debug       bool     `flag name:"debug" help:"Output debug messages"`
-	Quiet       bool     `flag name:"quiet" help:"Output only warnings, errors, and fatal messages to stderr log output"`
-	Silent      bool     `flag name:"silent" help:"Suppress all stderr log output"`
+	WebUI       *webUIOptions
+	Version     bool `flag name:"version" help:"Show version."`
+	Dry         bool `flag name:"dryrun" help:"Make a dry-run."`
+	Debug       bool `flag name:"debug" help:"Output debug messages"`
+	Quiet       bool `flag name:"quiet" help:"Output only warnings, errors, and fatal messages to stderr log output"`
+	Silent      bool `flag name:"silent" help:"Suppress all stderr log output"`
+}
+
+var cli cliOptions
+
+func parseCLI(args []string) (cliOptions, error) {
+	var parsed cliOptions
+	if len(args) > 0 && args[0] == "webui" {
+		options := webUIOptions{}
+		parser, err := kong.New(&options, kong.Name("gickup webui"), kong.Description("Run the local configuration WebUI."))
+		if err != nil {
+			return parsed, err
+		}
+		if _, err := parser.Parse(args[1:]); err != nil {
+			return parsed, err
+		}
+		parsed.WebUI = &options
+		return parsed, nil
+	}
+
+	parser, err := kong.New(&parsed, kong.Name("gickup"), kong.Description("a tool to backup all your favorite repos"))
+	if err != nil {
+		return parsed, err
+	}
+	_, err = parser.Parse(args)
+	return parsed, err
 }
 
 var version = "unknown"
@@ -1265,8 +1296,18 @@ func main() {
 		TimeFormat: timeformat,
 	})
 
-	kong.Parse(&cli, kong.Name("gickup"),
-		kong.Description("a tool to backup all your favorite repos"))
+	parsed, err := parseCLI(os.Args[1:])
+	if err != nil {
+		log.Fatal().Err(err).Msg("could not parse command line")
+	}
+	cli = parsed
+
+	if cli.WebUI != nil {
+		if err := runWebUI(cli.WebUI.ConfigDir, cli.WebUI.Port); err != nil {
+			log.Fatal().Err(err).Msg("could not start WebUI")
+		}
+		return
+	}
 
 	if cli.Version {
 		fmt.Println(version)
