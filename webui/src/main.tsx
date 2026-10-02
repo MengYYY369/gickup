@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import Form from "@rjsf/core";
 import validator from "@rjsf/validator-ajv8";
 import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
+import { AdvancedField, CronWidget, buildUiSchema } from "./editor";
 import "./style.css";
 
 type ConfigInfo = { name: string; documents: number; modified: string; valid: boolean };
@@ -316,6 +317,9 @@ const FILE_ACTION_MESSAGES: Record<FileAction["kind"], string> = {
   copy: "Configuration copied.",
 };
 
+const editorWidgets = { cron: CronWidget };
+const editorFields = { advanced: AdvancedField };
+
 export function App() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
   const [name, setName] = useState("");
@@ -540,7 +544,7 @@ export function App() {
       {!opened ? <h2>Select a YAML configuration</h2> : <>
         <header><h2>{name}</h2><button disabled={!dirty} onClick={prepareSave}>Review changes</button></header>
         {opened.warnings.map((warning, index) => <p className="warning" key={index}>{warning.path}: {warning.message}</p>)}
-        <Form schema={opened.schema} uiSchema={opened.uiSchema} formData={draft} validator={validator} liveValidate={false} onChange={event => { const next = event.formData ?? {}; setWorking(current => current.map((item, index) => index === document ? next : item)); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
+        <Form schema={opened.schema} uiSchema={{ ...buildUiSchema(opened.schema), ...opened.uiSchema }} widgets={editorWidgets} fields={editorFields} formData={draft} validator={validator} liveValidate={false} onChange={event => { const next = event.formData ?? {}; setWorking(current => current.map((item, index) => index === document ? next : item)); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
         <details><summary>Read-only YAML</summary><pre>{opened.yaml.source}</pre></details>
         {backupDiff && <section className="backup"><h3>Backup review</h3><pre>{backupDiff}</pre><button onClick={restoreOpenedBackup}>Restore backup</button></section>}
         {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre><button disabled={!review.valid || Boolean(externalVersion)} onClick={save}>Confirm save</button></section>}

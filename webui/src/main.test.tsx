@@ -273,4 +273,25 @@ describe("WebUI editor", () => {
     expect(html).toContain("Import configuration");
     expect(html).toContain("Trash");
   });
+
+  it("builds the editor ui schema with the cron widget and advanced sections", async () => {
+    const { buildUiSchema } = await import("./editor");
+    const uiSchema = buildUiSchema({ type: "object", properties: { destination: {}, log: {}, cron: {}, source: {}, metrics: {}, webhook: {} } });
+
+    expect(uiSchema["ui:order"]).toEqual(["cron", "source", "destination", "metrics", "webhook", "log"]);
+    expect(uiSchema.cron).toEqual({ "ui:widget": "cron" });
+    expect(uiSchema.metrics).toEqual({ "ui:field": "advanced" });
+    expect(uiSchema.webhook).toEqual({ "ui:field": "advanced" });
+    expect(uiSchema.log).toEqual({ "ui:field": "advanced" });
+  });
+
+  it("renders the cron widget with presets and guidance", async () => {
+    const { CronWidget } = await import("./editor");
+    const Widget = CronWidget as unknown as (props: Record<string, unknown>) => React.ReactElement;
+    const html = renderToStaticMarkup(<Widget id="root_cron" value="@daily" onChange={() => undefined} />);
+
+    expect(html).toContain("@daily");
+    expect(html).toContain("@hourly");
+    expect(html).toContain("cron expression");
+  });
 });

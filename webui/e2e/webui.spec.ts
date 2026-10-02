@@ -261,3 +261,25 @@ test("warns when the file changes on disk while editing", async ({ page }) => {
   await expect(page.getByRole("status")).toHaveText("Reloaded from disk.");
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
+
+test("shows cron guidance and collapses advanced sections", async ({ page }) => {
+  const schemaWithAdvanced = {
+    type: "object",
+    properties: {
+      cron: { type: "string", title: "Cron" },
+      metrics: { type: "object", title: "Metrics", properties: { listen_addr: { type: "string", title: "Listen address" } } },
+    },
+  };
+  await page.route("**/api/v1/configs/alpha.yml", async route => {
+    await route.fulfill({ json: { ...opened(), schema: schemaWithAdvanced } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "alpha.yml" }).click();
+  await expect(page.getByText("Five-field cron expression", { exact: false })).toBeVisible();
+
+  const advanced = page.locator("details.advanced-field");
+  await expect(advanced.locator("input#root_metrics_listen_addr")).not.toBeVisible();
+  await advanced.locator("summary").click();
+  await expect(advanced.locator("input#root_metrics_listen_addr")).toBeVisible();
+});
