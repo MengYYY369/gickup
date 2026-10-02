@@ -391,6 +391,13 @@ metrics:
         - urls-to-notify(https://github.com/caronc/apprise/wiki)
       tags:
         - your-tag
+
+webhook: # optional - GitHub push webhook service. When enabled, gickup keeps running and synchronizes the matching GitHub source on push events.
+  enabled: false # set to true to start the webhook listener
+  listen_addr: ":8081" # optional - address to listen on. Default: :8081
+  path: /webhooks/github # optional - endpoint path. Default: /webhooks/github
+  secret: change-me # required when enabled - secret used to verify X-Hub-Signature-256
+  queue_capacity: 32 # optional - bounded FIFO queue size. Default: 32
 ---
 
 # you can define separate source and destination pairs,

@@ -1,0 +1,9 @@
+.git
+.github
+webui/node_modules
+webui/dist
+webui/test-results
+webui/playwright-report
+gickup-e2e
+gickup-e2e.exe
+dist

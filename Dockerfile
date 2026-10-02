@@ -1,3 +1,12 @@
+FROM node:22-alpine AS webui
+
+# Build the WebUI assets that are embedded into the binary
+WORKDIR /webui
+COPY webui/package.json webui/package-lock.json ./
+RUN npm ci
+COPY webui/ ./
+RUN npm run build
+
 FROM golang:1.26-alpine AS builder
 
 # Install dependencies for copy
@@ -9,6 +18,7 @@ COPY go.mod .
 COPY go.sum .
 RUN go mod tidy
 COPY . .
+COPY --from=webui /webui/dist ./webui/dist
 
 # Fetching dependencies and build the app
 RUN go get -d -v ./...

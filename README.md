@@ -68,6 +68,38 @@ If your hoster is not listed, feel free to open an issue and I will add it.
 ## How to run the binary version
 `./gickup path-to-conf.yml`
 
+## Run the configuration WebUI
+Gickup can serve a local configuration editor for the YAML files in a directory:
+
+```bash
+./gickup webui --config-dir /path/to/configs --port 6175
+```
+
+- listens on `127.0.0.1` only and prints the URL; no login is required
+- manages the `*.yml` and `*.yaml` files directly inside the directory (no recursion)
+- loads, validates, edits and saves configurations while preserving comments, key order and unknown fields
+- includes a file workspace (create blank, create from `conf.example.yml`, import, rename, copy, delete to a trash folder) and a per-file backup with restore
+- sensitive values such as `token`, `password` and `secret` are masked by default and can be revealed on demand
+- `--config-dir` defaults to the current working directory, `--port` defaults to `6175`
+
+## Trigger backups with a GitHub webhook
+Instead of waiting for the next cron run, Gickup can stay running and synchronize the matching GitHub source whenever GitHub sends a push webhook:
+
+```yaml
+webhook:
+  enabled: true
+  listen_addr: ":8081"
+  path: /webhooks/github
+  secret: your-webhook-secret
+  queue_capacity: 32
+```
+
+- every push delivery must be signed with `X-Hub-Signature-256`; a non-empty secret is required
+- `ping` events are acknowledged without starting a synchronization
+- accepted pushes are processed one at a time through a bounded FIFO queue; a full queue returns HTTP 503
+- `GET /healthz` reports whether the listener is up
+- cron scheduling and webhook mode can run together
+
 ## How to run the Docker image
 ```bash
 mkdir gickup
@@ -76,7 +108,13 @@ nano conf.yml # Make your config here
 docker-compose up
 ```
 ## Compile the binary version
-`go build .`
+The binary embeds the WebUI, so build the frontend first:
+
+```bash
+make build   # runs npm ci && npm run build inside webui/, then go build
+```
+
+`go build .` alone works only after `webui/dist` has been generated.
 
 ## Compile the Docker Image
 ```bash
