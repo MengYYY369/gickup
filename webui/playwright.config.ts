@@ -11,6 +11,7 @@ export default defineConfig({
   webServer: {
     command: `npm run build && go build -o ../${binary} .. && ${runBinary} webui --port 4173 --config-dir .`,
     port: 4173,
+    timeout: 180_000,
     reuseExistingServer: !process.env.CI,
   },
   projects: [

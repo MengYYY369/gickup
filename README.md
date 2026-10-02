@@ -81,6 +81,7 @@ Gickup can serve a local configuration editor for the YAML files in a directory:
 - includes a file workspace (create blank, create from `conf.example.yml`, import, rename, copy, delete to a trash folder) and a per-file backup with restore
 - sensitive values such as `token`, `password` and `secret` are masked by default and can be revealed on demand
 - `--config-dir` defaults to the current working directory, `--port` defaults to `6175`
+- the listener is loopback-only by design, so when you run it inside a container publish nothing and use host networking or an SSH/port tunnel to reach it
 
 ## Trigger backups with a GitHub webhook
 Instead of waiting for the next cron run, Gickup can stay running and synchronize the matching GitHub source whenever GitHub sends a push webhook:
