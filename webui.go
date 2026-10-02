@@ -58,6 +58,7 @@ type webUIEditOperation struct {
 type webUIEditRequest struct {
 	Version    string               `json:"version"`
 	Confirmed  bool                 `json:"confirmed"`
+	Reveal     bool                 `json:"reveal"`
 	Operations []webUIEditOperation `json:"operations"`
 }
 
@@ -678,6 +679,26 @@ func newWebUIHandler(configDir string) (http.Handler, error) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", r.PathValue("name")))
 		_, _ = w.Write(raw)
 	})
+	mux.HandleFunc("GET /api/v1/configs/{name}/raw", func(w http.ResponseWriter, r *http.Request) {
+		path, ok := webUIExistingConfig(w, configRoot, r.PathValue("name"))
+		if !ok {
+			return
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(raw) > webUIMaxConfigSize {
+			http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if !utf8.Valid(raw) {
+			http.Error(w, "configuration must be UTF-8", http.StatusBadRequest)
+			return
+		}
+		writeWebUIJSON(w, map[string]interface{}{"yaml": string(raw)})
+	})
 	mux.HandleFunc("GET /api/v1/configs/{name}/backup", func(w http.ResponseWriter, r *http.Request) {
 		path, ok := webUIExistingConfig(w, configRoot, r.PathValue("name"))
 		if !ok {
@@ -872,9 +893,14 @@ func newWebUIHandler(configDir string) (http.Handler, error) {
 		draft = webUIPreserveLineEndings(raw, draft)
 		errors := webUIValidateDraft(draft, schema)
 		valid := len(errors) == 0
+		originalYAML, draftYAML := string(raw), string(draft)
+		if !request.Reveal {
+			originalYAML = webUIMaskSensitiveYAML(raw)
+			draftYAML = webUIMaskSensitiveYAML(draft)
+		}
 		writeWebUIJSON(w, map[string]interface{}{
-			"yaml":   webUIMaskSensitiveYAML(draft),
-			"diff":   webUIUnifiedDiff(r.PathValue("name"), []byte(webUIMaskSensitiveYAML(raw)), []byte(webUIMaskSensitiveYAML(draft))),
+			"yaml":   draftYAML,
+			"diff":   webUIUnifiedDiff(r.PathValue("name"), []byte(originalYAML), []byte(draftYAML)),
 			"valid":  valid,
 			"errors": errors,
 		})

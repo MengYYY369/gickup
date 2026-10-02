@@ -1388,6 +1388,94 @@ func TestWebUIReviewReturnsUnifiedDiff(t *testing.T) {
 	}
 }
 
+func TestWebUIRawEndpointRevealsUnmaskedYAML(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("source:\n  github:\n    - token: supersecret\n")
+	if err := os.WriteFile(filepath.Join(dir, "raw.yml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRecorder()
+	handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/api/v1/configs/raw.yml/raw", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("raw status=%d body=%q", r.Code, r.Body.String())
+	}
+	var response struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.YAML, "supersecret") {
+		t.Fatalf("raw response is masked: %q", response.YAML)
+	}
+
+	r = httptest.NewRecorder()
+	handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/api/v1/configs/raw.yml", nil))
+	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "supersecret") || !strings.Contains(r.Body.String(), "********") {
+		t.Fatalf("open response should stay masked: status=%d body=%q", r.Code, r.Body.String())
+	}
+}
+
+func TestWebUIRawEndpointRejectsUnsafeNames(t *testing.T) {
+	dir := t.TempDir()
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{
+		"/api/v1/configs/..%2fraw.yml/raw",
+		"/api/v1/configs/secret.txt/raw",
+		"/api/v1/configs/missing.yml/raw",
+	} {
+		r := httptest.NewRecorder()
+		handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, target, nil))
+		if r.Code < 400 {
+			t.Fatalf("target %q status=%d, want rejection", target, r.Code)
+		}
+	}
+}
+
+func TestWebUIReviewRevealControlsMasking(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("cron: '@daily'\nsource:\n  github:\n    - token: supersecret\n")
+	if err := os.WriteFile(filepath.Join(dir, "reveal.yml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	version := hex.EncodeToString(sum[:])
+	operations := `[{"op":"set-field","document":0,"path":"cron","value":"@hourly"}]`
+
+	for _, reveal := range []bool{false, true} {
+		body := fmt.Sprintf(`{"version":%q,"reveal":%t,"operations":%s}`, version, reveal, operations)
+		r := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/configs/reveal.yml/review", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(r, req)
+		if r.Code != http.StatusOK {
+			t.Fatalf("reveal=%t status=%d body=%q", reveal, r.Code, r.Body.String())
+		}
+		masked := strings.Contains(r.Body.String(), "********")
+		if masked == reveal {
+			t.Fatalf("reveal=%t masked=%t body=%q", reveal, masked, r.Body.String())
+		}
+		if reveal && !strings.Contains(r.Body.String(), "supersecret") {
+			t.Fatalf("revealed response lost the secret: %q", r.Body.String())
+		}
+		if !reveal && strings.Contains(r.Body.String(), "supersecret") {
+			t.Fatalf("masked response leaked the secret: %q", r.Body.String())
+		}
+	}
+}
+
 func TestWebUIReviewRejectsInvalidCronWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	raw := []byte("cron: '@daily'\n")

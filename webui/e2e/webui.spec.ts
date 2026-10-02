@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
 const schema = {
   type: "object",
   properties: {
@@ -282,4 +284,52 @@ test("shows cron guidance and collapses advanced sections", async ({ page }) => 
   await expect(advanced.locator("input#root_metrics_listen_addr")).not.toBeVisible();
   await advanced.locator("summary").click();
   await expect(advanced.locator("input#root_metrics_listen_addr")).toBeVisible();
+});
+
+test("reveals secrets in the read-only YAML on demand", async ({ page }) => {
+  const masked = { ...opened(), yaml: { source: "source:\n  github:\n    - token: ********\n" } };
+  await page.route("**/api/v1/configs/alpha.yml", async route => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ json: masked });
+      return;
+    }
+    await route.fulfill({ json: {} });
+  });
+  await page.route("**/api/v1/configs/alpha.yml/raw", async route => {
+    await route.fulfill({ json: { yaml: "source:\n  github:\n    - token: supersecret\n" } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "alpha.yml" }).click();
+  await page.getByText("Read-only YAML").click();
+  const preview = page.locator("details", { hasText: "Read-only YAML" }).locator("pre");
+  await expect(preview).toContainText("********");
+
+  await page.getByRole("button", { name: "Reveal secrets" }).first().click();
+  await expect(preview).toContainText("supersecret");
+
+  await page.getByRole("button", { name: "Hide secrets" }).first().click();
+  await expect(preview).toContainText("********");
+});
+
+test("offers draft download and copy when validation fails", async ({ page }) => {
+  await page.route("**/api/v1/configs/alpha.yml/review", async route => {
+    await route.fulfill({ json: { diff: "-cron: '@daily'\n+cron: invalid", yaml: "cron: invalid\n", valid: false, errors: ["cron is invalid"] } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "alpha.yml" }).click();
+  await page.getByLabel("Cron").fill("invalid");
+  await page.getByRole("button", { name: "Review changes" }).first().click();
+  await expect(page.getByText("cron is invalid")).toBeVisible();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download draft" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("alpha.yml.draft.yml");
+
+  await page.getByRole("button", { name: "Copy draft" }).click();
+  await expect(page.getByRole("status")).toHaveText("Draft copied to clipboard.");
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboard).toContain("cron: invalid");
 });

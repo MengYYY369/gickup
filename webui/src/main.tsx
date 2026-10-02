@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Form from "@rjsf/core";
 import validator from "@rjsf/validator-ajv8";
-import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
+import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, getRawConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
 import { AdvancedField, CronWidget, buildUiSchema } from "./editor";
 import "./style.css";
 
@@ -257,14 +257,32 @@ export function deleteArrayOperation(document: number, path: string, index: numb
   return { op: "delete-array", document, path, index };
 }
 
-export async function exportDownload(name: string) {
-  const content = await exportConfig(name);
+export function downloadText(name: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: "application/yaml;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export async function copyText(content: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(content);
+    return;
+  }
+  if (typeof document === "undefined") return;
+  const area = document.createElement("textarea");
+  area.value = content;
+  document.body.append(area);
+  area.select();
+  document.execCommand("copy");
+  area.remove();
+}
+
+export async function exportDownload(name: string) {
+  const content = await exportConfig(name);
+  downloadText(name, content);
 }
 
 export async function createWorkspaceConfig(name: string, template: "blank" | "example") {
@@ -335,6 +353,8 @@ export function App() {
   const [externalVersion, setExternalVersion] = useState<string | null>(null);
   const [externalSource, setExternalSource] = useState("");
   const [showExternalDiff, setShowExternalDiff] = useState(false);
+  const [revealSecrets, setRevealSecrets] = useState(false);
+  const [revealedYAML, setRevealedYAML] = useState("");
   const [message, setMessage] = useState("");
 
   useEffect(() => { listConfigs().then(setConfigs).catch(error => setMessage(String(error))); }, []);
@@ -371,6 +391,7 @@ export function App() {
     setPendingDocumentOperations([]);
     setDocument(0); setDirty(false); setReview(null);
     setExternalVersion(null); setExternalSource(""); setShowExternalDiff(false);
+    setRevealSecrets(false); setRevealedYAML("");
   }
 
   async function open(next: string) {
@@ -401,8 +422,42 @@ export function App() {
   async function prepareSave() {
     if (!opened) return;
     if (externalVersion) { setMessage("The file changed on disk. Reload before saving."); return; }
-    const result = await reviewConfig(name, { version: opened.version, operations: operations() });
+    const result = await reviewConfig(name, { version: opened.version, operations: operations(), reveal: revealSecrets });
     setReview(result); setMessage(result.valid ? "Review changes before saving." : "Fix validation errors before saving.");
+  }
+
+  async function refreshReview(reveal: boolean) {
+    if (!opened) return;
+    const result = await reviewConfig(name, { version: opened.version, operations: operations(), reveal });
+    setReview(result);
+  }
+
+  async function toggleRevealSecrets() {
+    if (!opened) return;
+    if (revealSecrets) {
+      setRevealSecrets(false);
+      setRevealedYAML("");
+      if (review) await refreshReview(false);
+      return;
+    }
+    try {
+      const raw = await getRawConfig(name);
+      setRevealedYAML(raw.yaml);
+      setRevealSecrets(true);
+      if (review) await refreshReview(true);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function copyDraft() {
+    if (!review) return;
+    try {
+      await copyText(review.yaml);
+      setMessage("Draft copied to clipboard.");
+    } catch (error) {
+      setMessage(String(error));
+    }
   }
 
   async function save() {
@@ -545,9 +600,21 @@ export function App() {
         <header><h2>{name}</h2><button disabled={!dirty} onClick={prepareSave}>Review changes</button></header>
         {opened.warnings.map((warning, index) => <p className="warning" key={index}>{warning.path}: {warning.message}</p>)}
         <Form schema={opened.schema} uiSchema={{ ...buildUiSchema(opened.schema), ...opened.uiSchema }} widgets={editorWidgets} fields={editorFields} formData={draft} validator={validator} liveValidate={false} onChange={event => { const next = event.formData ?? {}; setWorking(current => current.map((item, index) => index === document ? next : item)); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
-        <details><summary>Read-only YAML</summary><pre>{opened.yaml.source}</pre></details>
+        <details><summary>Read-only YAML</summary>
+          <button onClick={() => void toggleRevealSecrets()}>{revealSecrets ? "Hide secrets" : "Reveal secrets"}</button>
+          <pre>{revealSecrets && revealedYAML ? revealedYAML : opened.yaml.source}</pre>
+        </details>
         {backupDiff && <section className="backup"><h3>Backup review</h3><pre>{backupDiff}</pre><button onClick={restoreOpenedBackup}>Restore backup</button></section>}
-        {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre><button disabled={!review.valid || Boolean(externalVersion)} onClick={save}>Confirm save</button></section>}
+        {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre>
+          <div className="review-actions">
+            <button onClick={() => void toggleRevealSecrets()}>{revealSecrets ? "Hide secrets" : "Reveal secrets"}</button>
+            {!review.valid && <>
+              <button onClick={() => downloadText(`${name}.draft.yml`, review.yaml)}>Download draft</button>
+              <button onClick={() => void copyDraft()}>Copy draft</button>
+            </>}
+            <button disabled={!review.valid || Boolean(externalVersion)} onClick={save}>Confirm save</button>
+          </div>
+        </section>}
       </>}
     </section>
   </main>;

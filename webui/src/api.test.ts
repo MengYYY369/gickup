@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
+import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, getRawConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
 
 describe("listConfigs", () => {
   it("returns the configuration list from the versioned API", async () => {
@@ -31,6 +31,19 @@ describe("getConfig", () => {
 
     await expect(getConfig("alpha.yml", fetcher)).resolves.toEqual({ version: "v1", documents: [] });
     expect(requested).toBe("/api/v1/configs/alpha.yml");
+  });
+});
+
+describe("getRawConfig", () => {
+  it("loads the unmasked YAML on demand", async () => {
+    let requested = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requested = String(input);
+      return new Response(JSON.stringify({ yaml: "token: secret\n" }));
+    };
+
+    await expect(getRawConfig("alpha.yml", fetcher)).resolves.toEqual({ yaml: "token: secret\n" });
+    expect(requested).toBe("/api/v1/configs/alpha.yml/raw");
   });
 });
 

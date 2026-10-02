@@ -21,6 +21,11 @@ export async function exportConfig(name: string, fetcher: typeof fetch = fetch) 
   return response.text();
 }
 
+export async function getRawConfig(name: string, fetcher: typeof fetch = fetch) {
+  const response = await fetcher(`/api/v1/configs/${encodeURIComponent(name)}/raw`);
+  return readJSON(response);
+}
+
 export async function reviewConfig(name: string, draft: unknown, fetcher: typeof fetch = fetch) {
   const response = await fetcher(`/api/v1/configs/${encodeURIComponent(name)}/review`, {
     method: "POST",
