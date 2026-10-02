@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exportConfig, getBackup, getConfig, listConfigs, listTrash, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
+import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
 
 describe("listConfigs", () => {
   it("returns the configuration list from the versioned API", async () => {
@@ -118,5 +118,39 @@ describe("recovery APIs", () => {
       { url: "/api/v1/configs/alpha.yml/backup", method: undefined },
       { url: "/api/v1/configs/alpha.yml/backup/restore", method: "POST" },
     ]);
+  });
+});
+
+describe("mutation APIs", () => {
+  it("accepts empty success bodies", async () => {
+    const fetcher = async () => new Response(null, { status: 200 });
+
+    await expect(deleteConfig("alpha.yml", fetcher)).resolves.toBeNull();
+    await expect(renameConfig("alpha.yml", "beta.yml", fetcher)).resolves.toBeNull();
+    await expect(createConfig("gamma.yml", "blank", fetcher)).resolves.toBeNull();
+    await expect(copyConfig("alpha.yml", "delta.yml", fetcher)).resolves.toBeNull();
+    await expect(importConfig("epsilon.yml", "cron: '@daily'\n", fetcher)).resolves.toBeNull();
+    await expect(saveConfig("alpha.yml", { version: "v1", confirmed: true, operations: [] }, fetcher)).resolves.toBeNull();
+    await expect(restoreBackup("alpha.yml", fetcher)).resolves.toBeNull();
+  });
+
+  it("deletes a trash entry permanently", async () => {
+    let requested = "";
+    let init: RequestInit | undefined;
+    const fetcher = async (input: RequestInfo | URL, options?: RequestInit) => {
+      requested = String(input);
+      init = options;
+      return new Response(null, { status: 200 });
+    };
+
+    await expect(deleteTrash("entry / one", fetcher)).resolves.toBeNull();
+    expect(requested).toBe("/api/v1/trash/entry%20%2F%20one");
+    expect(init?.method).toBe("DELETE");
+  });
+
+  it("surfaces failed mutations", async () => {
+    const fetcher = async () => new Response("nope", { status: 500 });
+
+    await expect(deleteConfig("alpha.yml", fetcher)).rejects.toThrow("HTTP 500");
   });
 });

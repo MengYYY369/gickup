@@ -252,4 +252,25 @@ describe("WebUI editor", () => {
     expect(removed).toEqual([{ source: { any: [{ url: "one" }, { url: "three" }] } }]);
     expect(documents).toEqual([{ source: { any: [{ url: "one" }, { url: "two" }] } }]);
   });
+
+  it("validates configuration file names", async () => {
+    const { configNameError } = await import("./main");
+    expect(configNameError("conf.yml")).toBeNull();
+    expect(configNameError("nested.yaml")).toBeNull();
+    expect(configNameError("")).toMatch(/file name/i);
+    expect(configNameError("   ")).toMatch(/file name/i);
+    expect(configNameError(".hidden.yml")).toMatch(/dot/i);
+    expect(configNameError("sub/conf.yml")).toMatch(/slash/i);
+    expect(configNameError("sub\\conf.yml")).toMatch(/slash/i);
+    expect(configNameError("conf.txt")).toMatch(/\.ya?ml/i);
+  });
+
+  it("offers blank, example, and import entries in the sidebar", async () => {
+    const { App } = await import("./main");
+    const html = renderToStaticMarkup(<App />);
+    expect(html).toContain("New configuration");
+    expect(html).toContain("From example");
+    expect(html).toContain("Import configuration");
+    expect(html).toContain("Trash");
+  });
 });

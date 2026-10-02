@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Form from "@rjsf/core";
 import validator from "@rjsf/validator-ajv8";
-import { copyConfig, createConfig, deleteConfig, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
+import { copyConfig, createConfig, deleteConfig, deleteTrash, exportConfig, getBackup, getConfig, importConfig, listConfigs, listTrash, renameConfig, restoreBackup, restoreTrash, reviewConfig, saveConfig } from "./api";
 import "./style.css";
 
 type ConfigInfo = { name: string; documents: number; modified: string; valid: boolean };
@@ -291,6 +291,31 @@ export async function deleteWorkspaceConfig(name: string) {
   return listConfigs();
 }
 
+type FileAction = {
+  kind: "new" | "import" | "rename" | "copy";
+  name: string;
+  template: "blank" | "example";
+  content: string;
+};
+
+export const EXTERNAL_CHANGE_POLL_MS = 3000;
+
+export function configNameError(value: string): string | null {
+  const name = value.trim();
+  if (!name) return "Enter a file name.";
+  if (name.startsWith(".")) return "File names cannot start with a dot.";
+  if (name !== name.replace(/[\\/]/g, "")) return "File names cannot contain slashes.";
+  if (!/\.(ya?ml)$/i.test(name)) return "Use a .yml or .yaml file name.";
+  return null;
+}
+
+const FILE_ACTION_MESSAGES: Record<FileAction["kind"], string> = {
+  new: "Configuration created.",
+  import: "Configuration imported.",
+  rename: "Configuration renamed.",
+  copy: "Configuration copied.",
+};
+
 export function App() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
   const [name, setName] = useState("");
@@ -302,6 +327,10 @@ export function App() {
   const [review, setReview] = useState<{ diff: string; yaml: string; valid: boolean; errors: string[] } | null>(null);
   const [backupDiff, setBackupDiff] = useState("");
   const [trash, setTrash] = useState<{ id: string; original: string }[]>([]);
+  const [fileAction, setFileAction] = useState<FileAction | null>(null);
+  const [externalVersion, setExternalVersion] = useState<string | null>(null);
+  const [externalSource, setExternalSource] = useState("");
+  const [showExternalDiff, setShowExternalDiff] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => { listConfigs().then(setConfigs).catch(error => setMessage(String(error))); }, []);
@@ -311,6 +340,24 @@ export function App() {
     return () => removeEventListener("beforeunload", guard);
   }, [dirty]);
 
+  useEffect(() => {
+    if (!opened || !dirty || externalVersion) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const latest = await getConfig(name) as OpenConfig;
+        if (cancelled || latest.version === opened.version) return;
+        setExternalVersion(latest.version);
+        setExternalSource(latest.yaml.source);
+      } catch {
+        // A failed probe must not interrupt editing.
+      }
+    };
+    const timer = setInterval(() => void check(), EXTERNAL_CHANGE_POLL_MS);
+    addEventListener("focus", check);
+    return () => { cancelled = true; clearInterval(timer); removeEventListener("focus", check); };
+  }, [opened, dirty, externalVersion, name]);
+
   const draft = working[document] ?? {};
 
   async function load(next: string) {
@@ -319,6 +366,7 @@ export function App() {
     setWorking(value.documents.map(item => structuredClone(item)));
     setPendingDocumentOperations([]);
     setDocument(0); setDirty(false); setReview(null);
+    setExternalVersion(null); setExternalSource(""); setShowExternalDiff(false);
   }
 
   async function open(next: string) {
@@ -348,12 +396,13 @@ export function App() {
 
   async function prepareSave() {
     if (!opened) return;
+    if (externalVersion) { setMessage("The file changed on disk. Reload before saving."); return; }
     const result = await reviewConfig(name, { version: opened.version, operations: operations() });
     setReview(result); setMessage(result.valid ? "Review changes before saving." : "Fix validation errors before saving.");
   }
 
   async function save() {
-    if (!opened || !review?.valid || !confirm("Save these reviewed changes?")) return;
+    if (!opened || externalVersion || !review?.valid || !confirm("Save these reviewed changes?")) return;
     try {
       await saveConfig(name, { version: opened.version, confirmed: true, operations: operations() });
       await load(name); setMessage("Saved.");
@@ -387,16 +436,101 @@ export function App() {
     setMessage("Configuration restored from trash.");
   }
 
+  async function submitFileAction() {
+    if (!fileAction) return;
+    const target = fileAction.name.trim();
+    const nameError = configNameError(target);
+    if (nameError) {
+      setMessage(nameError);
+      return;
+    }
+    if (fileAction.kind === "import" && !fileAction.content.trim()) {
+      setMessage("Paste the configuration content first.");
+      return;
+    }
+    try {
+      if (fileAction.kind === "new") await createConfig(target, fileAction.template);
+      else if (fileAction.kind === "import") await importConfig(target, fileAction.content);
+      else if (fileAction.kind === "rename") await renameConfig(name, target);
+      else await copyConfig(name, target);
+      setFileAction(null);
+      setConfigs(await listConfigs());
+      await load(target);
+      setMessage(FILE_ACTION_MESSAGES[fileAction.kind]);
+    } catch (error) {
+      setMessage(String(error).includes("409") ? "A configuration with this name already exists." : String(error));
+    }
+  }
+
+  async function removeOpened() {
+    if (!opened || !name) return;
+    if (!confirm(`Move ${name} to trash?`)) return;
+    try {
+      await deleteConfig(name);
+      setConfigs(await listConfigs());
+      setName(""); setOpened(null); setWorking([]); setPendingDocumentOperations([]); setDocument(0);
+      setDirty(false); setReview(null); setExternalVersion(null); setBackupDiff("");
+      setMessage("Moved to trash.");
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function removeTrashEntry(id: string) {
+    if (!confirm("Delete this configuration permanently?")) return;
+    try {
+      await deleteTrash(id);
+      setTrash(await listTrash());
+      setMessage("Deleted permanently.");
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function reloadFromDisk() {
+    if (!name) return;
+    if (dirty && !confirm("Discard unsaved changes and reload from disk?")) return;
+    await load(name);
+    setMessage("Reloaded from disk.");
+  }
+
   return <main className="app">
     <aside><h1>Gickup</h1><p>Configuration editor</p>
-      <div className="workspace-actions"><button onClick={() => createConfig("new.yml", "blank")}>New configuration</button><button onClick={() => importConfig("import.yml", "")}>Import configuration</button><button onClick={showTrash}>Trash</button></div>
-      <div className="file-actions"><button disabled={!opened} onClick={() => name && renameConfig(name, name)}>Rename</button><button disabled={!opened} onClick={() => name && copyConfig(name, `copy-${name}`)}>Copy</button><button disabled={!opened} onClick={() => name && exportDownload(name)}>Export</button><button disabled={!opened} onClick={showBackup}>Backup</button><button disabled={!opened} onClick={() => name && deleteConfig(name)}>Delete</button></div>
-      {trash.length > 0 && <section aria-label="Trash entries">{trash.map(entry => <div key={entry.id}><span>{entry.original}</span><button onClick={() => restoreTrashEntry(entry.id)}>Restore {entry.original}</button></div>)}</section>}
-      <ul>{configs.map(config => <li key={config.name}><button onClick={() => open(config.name)}>{config.name}</button><small>{config.documents} docs · {config.valid ? "valid" : "invalid"}</small></li>)}</ul>
+      <div className="workspace-actions">
+        <button onClick={() => setFileAction({ kind: "new", name: "", template: "blank", content: "" })}>New configuration</button>
+        <button onClick={() => setFileAction({ kind: "new", name: "", template: "example", content: "" })}>From example</button>
+        <button onClick={() => setFileAction({ kind: "import", name: "", template: "blank", content: "" })}>Import configuration</button>
+        <button onClick={showTrash}>Trash</button>
+      </div>
+      {fileAction && <form className="file-action" onSubmit={event => { event.preventDefault(); void submitFileAction(); }}>
+        <input aria-label="File name" value={fileAction.name} onChange={event => setFileAction({ ...fileAction, name: event.target.value })} />
+        {fileAction.kind === "new" && <select aria-label="Template" value={fileAction.template} onChange={event => setFileAction({ ...fileAction, template: event.target.value as FileAction["template"] })}><option value="blank">Blank configuration</option><option value="example">From example</option></select>}
+        {fileAction.kind === "import" && <textarea aria-label="Configuration content" value={fileAction.content} onChange={event => setFileAction({ ...fileAction, content: event.target.value })} />}
+        <button type="submit" aria-label="Confirm file action">{fileAction.kind === "new" ? "Create" : fileAction.kind === "import" ? "Import" : fileAction.kind === "rename" ? "Rename" : "Copy"}</button>
+        <button type="button" onClick={() => setFileAction(null)}>Cancel</button>
+      </form>}
+      <div className="file-actions">
+        <button disabled={!opened} onClick={() => name && setFileAction({ kind: "rename", name, template: "blank", content: "" })}>Rename</button>
+        <button disabled={!opened} onClick={() => name && setFileAction({ kind: "copy", name: `copy-${name}`, template: "blank", content: "" })}>Copy</button>
+        <button disabled={!opened} onClick={() => name && exportDownload(name)}>Export</button>
+        <button disabled={!opened} onClick={showBackup}>Backup</button>
+        <button disabled={!opened} onClick={() => void removeOpened()}>Delete</button>
+      </div>
+      {trash.length > 0 && <section aria-label="Trash entries">{trash.map(entry => <div key={entry.id}><span>{entry.original}</span><button onClick={() => restoreTrashEntry(entry.id)}>Restore {entry.original}</button><button onClick={() => void removeTrashEntry(entry.id)}>Delete forever</button></div>)}</section>}
+      <ul>{configs.map(config => <li key={config.name}><button onClick={() => open(config.name)}>{config.name}</button><small>{config.documents} docs · {config.valid ? "valid" : "invalid"}{config.modified ? ` · ${new Date(config.modified).toLocaleString()}` : ""}{config.name === name && dirty ? " · unsaved" : ""}</small></li>)}</ul>
       {opened && <nav>{working.map((_, index) => <button key={index} onClick={() => { if (!dirty || confirm("Discard unsaved changes?")) { setDocument(index); setDirty(false); } }}>Configuration {index + 1}</button>)}</nav>}
     </aside>
     <section>
       {message && <p role="status">{message}</p>}
+      {externalVersion && <section className="conflict" role="alert">
+        <p>The file changed on disk since it was opened.</p>
+        <button onClick={() => setShowExternalDiff(!showExternalDiff)}>{showExternalDiff ? "Hide differences" : "View differences"}</button>
+        <button onClick={() => void reloadFromDisk()}>Reload from disk</button>
+      </section>}
+      {showExternalDiff && opened && <section className="external-diff">
+        <div><h3>Loaded version</h3><pre>{opened.yaml.source}</pre></div>
+        <div><h3>Current disk version</h3><pre>{externalSource}</pre></div>
+      </section>}
       <EditorControls
         documents={working}
         activeDocument={document}
@@ -409,7 +543,7 @@ export function App() {
         <Form schema={opened.schema} uiSchema={opened.uiSchema} formData={draft} validator={validator} liveValidate={false} onChange={event => { const next = event.formData ?? {}; setWorking(current => current.map((item, index) => index === document ? next : item)); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
         <details><summary>Read-only YAML</summary><pre>{opened.yaml.source}</pre></details>
         {backupDiff && <section className="backup"><h3>Backup review</h3><pre>{backupDiff}</pre><button onClick={restoreOpenedBackup}>Restore backup</button></section>}
-        {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre><button disabled={!review.valid} onClick={save}>Confirm save</button></section>}
+        {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre><button disabled={!review.valid || Boolean(externalVersion)} onClick={save}>Confirm save</button></section>}
       </>}
     </section>
   </main>;
