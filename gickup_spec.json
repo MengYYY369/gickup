@@ -476,11 +476,11 @@
                                 "$ref": "#/definitions/source/properties/include"
                             }
                         },
-                        "additionalProperties": false
-                    },
-                    "required": [
-                        "url"
-                    ]
+                        "additionalProperties": false,
+                        "required": [
+                            "url"
+                        ]
+                    }
                 },
                 "any": {
                     "type": "array",
@@ -1342,6 +1342,13 @@
                                 "type": "string"
                             },
                             "description": "A list of urls to check for heartbeat"
+                        },
+                        "failure_urls": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "A list of urls to ping instead when the backup run encountered errors"
                         }
                     }
                 },

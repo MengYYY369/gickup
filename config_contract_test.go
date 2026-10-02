@@ -404,6 +404,7 @@ type modelContractAuditMetadata struct {
 var modelContractAudit = modelContractAuditMetadata{
 	Required: map[string][]string{
 		"#/properties/source/properties/any/items":        {"url"},
+		"#/properties/source/properties/opengist/items":   {"url"},
 		"#/properties/destination/properties/local/items": {"path"},
 	},
 	Enums: map[string][]interface{}{
