@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -66,7 +67,7 @@ func webUIEditYAML(raw []byte, operations []webUIEditOperation) ([]byte, error) 
 		return nil, err
 	}
 	for _, operation := range operations {
-		if operation.Op != "delete-field" && operation.Op != "move-document" && operation.Op != "copy-document" && operation.Op != "delete-document" && operation.Op != "add-document" && operation.Op != "move-array" && operation.Op != "copy-array" && operation.Op != "delete-array" && operation.Op != "add-array" {
+		if operation.Op != "delete-field" && operation.Op != "set-field" && operation.Op != "move-document" && operation.Op != "copy-document" && operation.Op != "delete-document" && operation.Op != "add-document" && operation.Op != "move-array" && operation.Op != "copy-array" && operation.Op != "delete-array" && operation.Op != "add-array" {
 			return nil, fmt.Errorf("unsupported editor operation %q", operation.Op)
 		}
 		if operation.Op == "move-document" {
@@ -138,6 +139,20 @@ func webUIEditYAML(raw []byte, operations []webUIEditOperation) ([]byte, error) 
 				return nil, fmt.Errorf("invalid document value")
 			}
 			file = added
+			continue
+		}
+		if operation.Op == "set-field" {
+			if operation.Document < 0 || operation.Document >= len(file.Docs) {
+				return nil, fmt.Errorf("invalid document index")
+			}
+			if operation.Path == "" {
+				return nil, fmt.Errorf("field path is required")
+			}
+			node, err := webUISetYAMLNode(file.Docs[operation.Document].Body, strings.Split(operation.Path, "."), operation.Value, 1)
+			if err != nil {
+				return nil, err
+			}
+			file.Docs[operation.Document].Body = node
 			continue
 		}
 		if strings.HasSuffix(operation.Op, "-array") {
@@ -272,6 +287,187 @@ func webUIParseYAMLNode(raw string) (ast.Node, error) {
 		return nil, fmt.Errorf("invalid YAML value")
 	}
 	return parsed.Docs[0].Body, nil
+}
+
+func webUIIndentYAML(raw []byte, spaces int) []byte {
+	if spaces <= 0 {
+		return raw
+	}
+	prefix := strings.Repeat(" ", spaces)
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	for index, line := range lines {
+		if line != "" {
+			lines[index] = prefix + line
+		}
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// webUINormalizeValue keeps integral JSON numbers (always float64 after
+// decoding) as integers so saves do not rewrite 7 as 7.0.
+func webUINormalizeValue(value interface{}) interface{} {
+	switch current := value.(type) {
+	case float64:
+		if current == math.Trunc(current) && math.Abs(current) < 1<<53 {
+			return int64(current)
+		}
+		return current
+	case map[string]interface{}:
+		normalized := make(map[string]interface{}, len(current))
+		for key, child := range current {
+			normalized[key] = webUINormalizeValue(child)
+		}
+		return normalized
+	case []interface{}:
+		normalized := make([]interface{}, len(current))
+		for index, child := range current {
+			normalized[index] = webUINormalizeValue(child)
+		}
+		return normalized
+	default:
+		return value
+	}
+}
+
+// webUIParseYAMLValue converts a JSON value into a YAML AST node whose nested
+// entries are indented for the given key column.
+func webUIParseYAMLValue(value interface{}, column int) (ast.Node, error) {
+	raw, err := yaml.Marshal(webUINormalizeValue(value))
+	if err != nil {
+		return nil, err
+	}
+	return webUIParseYAMLNode(string(webUIIndentYAML(raw, column-1)))
+}
+
+// webUINestedValue nests value under the path segments as fresh mappings.
+func webUINestedValue(parts []string, value interface{}) map[string]interface{} {
+	var nested interface{} = webUINormalizeValue(value)
+	for index := len(parts) - 1; index >= 1; index-- {
+		nested = map[string]interface{}{parts[index]: nested}
+	}
+	return map[string]interface{}{parts[0]: nested}
+}
+
+// webUINestedMapping parses the nested value as a block mapping indented for the
+// given key column.
+func webUINestedMapping(parts []string, value interface{}, column int) (ast.Node, error) {
+	raw, err := yaml.Marshal(webUINestedValue(parts, value))
+	if err != nil {
+		return nil, err
+	}
+	return webUIParseYAMLNode(string(webUIIndentYAML(raw, column-1)))
+}
+
+// webUIMissingMappingEntry builds the mapping entry for parts[0], nesting the
+// remaining path segments as fresh mappings around value.
+func webUIMissingMappingEntry(parts []string, value interface{}, column int, flow bool) (*ast.MappingValueNode, error) {
+	var body ast.Node
+	var err error
+	if flow {
+		var raw []byte
+		raw, err = yaml.MarshalWithOptions(webUINestedValue(parts, value), yaml.Flow(true))
+		if err == nil {
+			body, err = webUIParseYAMLNode(string(raw))
+		}
+	} else {
+		body, err = webUINestedMapping(parts, value, column)
+	}
+	if err != nil {
+		return nil, err
+	}
+	mapping, ok := body.(*ast.MappingNode)
+	if !ok || len(mapping.Values) != 1 {
+		return nil, fmt.Errorf("invalid YAML entry for field %q", parts[0])
+	}
+	return mapping.Values[0], nil
+}
+
+func webUITransferComment(original, replacement ast.Node) {
+	if original == nil || replacement == nil {
+		return
+	}
+	if comment := original.GetComment(); comment != nil {
+		_ = replacement.SetComment(comment)
+	}
+}
+
+// webUISetYAMLNode writes value at the dotted path, creating missing mappings
+// along the way while leaving comments and untouched nodes in place. column is
+// the key column new entries under node should use.
+func webUISetYAMLNode(node ast.Node, parts []string, value interface{}, column int) (ast.Node, error) {
+	if len(parts) == 0 {
+		return webUIParseYAMLValue(value, column)
+	}
+	if node == nil {
+		return webUINestedMapping(parts, value, column)
+	}
+	if _, ok := node.(*ast.NullNode); ok {
+		return webUINestedMapping(parts, value, column)
+	}
+	switch current := node.(type) {
+	case *ast.MappingNode:
+		for _, entry := range current.Values {
+			if entry.Key.String() != parts[0] {
+				continue
+			}
+			keyColumn := entry.Key.GetToken().Position.Column
+			if len(parts) == 1 {
+				replacement, err := webUIParseYAMLValue(value, keyColumn+2)
+				if err != nil {
+					return nil, err
+				}
+				webUITransferComment(entry.Value, replacement)
+				entry.Value = replacement
+				return current, nil
+			}
+			childColumn := keyColumn + 2
+			if sequence, ok := entry.Value.(*ast.SequenceNode); ok && sequence.Start != nil {
+				childColumn = sequence.Start.Position.Column + 2
+			}
+			child, err := webUISetYAMLNode(entry.Value, parts[1:], value, childColumn)
+			if err != nil {
+				return nil, err
+			}
+			entry.Value = child
+			return current, nil
+		}
+		targetColumn := column
+		if len(current.Values) > 0 && current.Values[0].Key != nil {
+			targetColumn = current.Values[0].Key.GetToken().Position.Column
+		}
+		entry, err := webUIMissingMappingEntry(parts, value, targetColumn, current.IsFlowStyle)
+		if err != nil {
+			return nil, err
+		}
+		current.Values = append(current.Values, entry)
+		return current, nil
+	case *ast.SequenceNode:
+		var index int
+		if _, err := fmt.Sscanf(parts[0], "%d", &index); err != nil || index < 0 || index >= len(current.Values) {
+			return nil, fmt.Errorf("invalid array path %q", strings.Join(parts, "."))
+		}
+		childColumn := column
+		if current.Start != nil {
+			childColumn = current.Start.Position.Column + 2
+		}
+		if len(parts) == 1 {
+			replacement, err := webUIParseYAMLValue(value, childColumn)
+			if err != nil {
+				return nil, err
+			}
+			webUITransferComment(current.Values[index], replacement)
+			current.Values[index] = replacement
+			return current, nil
+		}
+		child, err := webUISetYAMLNode(current.Values[index], parts[1:], value, childColumn)
+		if err != nil {
+			return nil, err
+		}
+		current.Values[index] = child
+		return current, nil
+	default:
+		return nil, fmt.Errorf("field %q not found", strings.Join(parts, "."))
+	}
 }
 
 func webUIParseDocuments(raw []byte, schema map[string]interface{}) ([]map[string]interface{}, []webUIWarning, error) {

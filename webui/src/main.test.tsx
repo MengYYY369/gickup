@@ -173,4 +173,83 @@ describe("WebUI editor", () => {
     expect(module).toHaveProperty("importWorkspaceConfig");
     expect(module).toHaveProperty("deleteWorkspaceConfig");
   });
+
+  it("writes changed scalar values as set-field operations", async () => {
+    const { documentOperations } = await import("./main");
+    expect(documentOperations(
+      { cron: "@daily", source: { github: [{ token: "********", url: "https://one.test" }] } },
+      { cron: "@hourly", source: { github: [{ token: "********", url: "https://two.test" }] } },
+      1,
+    )).toEqual([
+      { op: "set-field", document: 1, path: "cron", value: "@hourly" },
+      { op: "set-field", document: 1, path: "source.github.0.url", value: "https://two.test" },
+    ]);
+  });
+
+  it("creates newly added keys and array items", async () => {
+    const { documentOperations } = await import("./main");
+    expect(documentOperations(
+      { source: { github: [{ url: "https://one.test" }] } },
+      { source: { github: [{ url: "https://one.test" }, { url: "https://two.test" }] }, log: { level: "debug" } },
+      0,
+    )).toEqual([
+      { op: "add-array", document: 0, path: "source.github", value: { url: "https://two.test" } },
+      { op: "set-field", document: 0, path: "log", value: { level: "debug" } },
+    ]);
+  });
+
+  it("removes trailing array items through delete-array operations", async () => {
+    const { documentOperations } = await import("./main");
+    expect(documentOperations(
+      { source: { any: [{ url: "one" }, { url: "two" }, { url: "three" }] } },
+      { source: { any: [{ url: "one" }] } },
+      0,
+    )).toEqual([
+      { op: "delete-array", document: 0, path: "source.any", index: 2 },
+      { op: "delete-array", document: 0, path: "source.any", index: 1 },
+    ]);
+  });
+
+  it("leaves masked sensitive values untouched unless they change", async () => {
+    const { documentOperations } = await import("./main");
+    expect(documentOperations(
+      { source: { github: [{ token: "********" }] } },
+      { source: { github: [{ token: "********" }] } },
+      0,
+    )).toEqual([]);
+    expect(documentOperations(
+      { source: { github: [{ token: "********" }] } },
+      { source: { github: [{ token: "new-token" }] } },
+      0,
+    )).toEqual([{ op: "set-field", document: 0, path: "source.github.0.token", value: "new-token" }]);
+    expect(documentOperations(
+      { source: { github: [{ token: "********" }] } },
+      { source: { github: [{ token: "" }] } },
+      0,
+    )).toEqual([{ op: "delete-field", document: 0, path: "source.github.0.token" }]);
+  });
+
+  it("stages pending document operations before field diffs", async () => {
+    const { pendingOperations } = await import("./main");
+    const base = [{ cron: "@daily" }, { cron: "@weekly" }];
+    expect(pendingOperations(base, [{ op: "copy-document", index: 0 }], [
+      { cron: "@daily" }, { cron: "@monthly" }, { cron: "@weekly" },
+    ])).toEqual([
+      { op: "copy-document", index: 0 },
+      { op: "set-field", document: 1, path: "cron", value: "@monthly" },
+    ]);
+    expect(base).toEqual([{ cron: "@daily" }, { cron: "@weekly" }]);
+  });
+
+  it("applies ordered array operations to a document copy", async () => {
+    const { applyArrayOperation } = await import("./main");
+    const documents = [{ source: { any: [{ url: "one" }, { url: "two" }] } }];
+    const moved = applyArrayOperation(documents, { op: "move-array", document: 0, path: "source.any", from: 0, to: 1 });
+    expect(moved).toEqual([{ source: { any: [{ url: "two" }, { url: "one" }] } }]);
+    const added = applyArrayOperation(moved, { op: "add-array", document: 0, path: "source.any", value: { url: "three" } });
+    expect(added).toEqual([{ source: { any: [{ url: "two" }, { url: "one" }, { url: "three" }] } }]);
+    const removed = applyArrayOperation(added, { op: "delete-array", document: 0, path: "source.any", index: 0 });
+    expect(removed).toEqual([{ source: { any: [{ url: "one" }, { url: "three" }] } }]);
+    expect(documents).toEqual([{ source: { any: [{ url: "one" }, { url: "two" }] } }]);
+  });
 });

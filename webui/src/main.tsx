@@ -96,26 +96,52 @@ export function EditorControls({ documents, activeDocument, warnings, onOperatio
 
 export function documentOperations(original: Record<string, unknown>, draft: Record<string, unknown>, document: number) {
   const operations: Record<string, unknown>[] = [];
-
-  function findClearedFields(before: unknown, after: unknown, path: string) {
-    if (before === undefined || before === null || before === "") return;
-    if (after === "" || after === undefined) {
-      operations.push({ op: "delete-field", document, path });
-      return;
-    }
-    if (Array.isArray(before) && Array.isArray(after)) {
-      before.forEach((value, index) => findClearedFields(value, after[index], path ? `${path}.${index}` : String(index)));
-      return;
-    }
-    if (typeof before === "object" && before !== null && typeof after === "object" && after !== null) {
-      Object.entries(before as Record<string, unknown>).forEach(([key, value]) => {
-        findClearedFields(value, (after as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
-      });
-    }
-  }
-
-  findClearedFields(original, draft, "");
+  diffDocumentValue(original, draft, "", document, operations);
   return operations;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function diffDocumentValue(base: unknown, draft: unknown, path: string, document: number, operations: Record<string, unknown>[]) {
+  const childPath = (segment: string | number) => (path ? `${path}.${segment}` : String(segment));
+
+  if (base === undefined || base === null) {
+    if (draft === undefined || draft === null || draft === "") return;
+    operations.push({ op: "set-field", document, path, value: draft });
+    return;
+  }
+  if (draft === undefined || draft === null || draft === "") {
+    if (base === "") return;
+    operations.push({ op: "delete-field", document, path });
+    return;
+  }
+  if (Array.isArray(base) && Array.isArray(draft)) {
+    const shared = Math.min(base.length, draft.length);
+    for (let index = 0; index < shared; index++) {
+      diffDocumentValue(base[index], draft[index], childPath(index), document, operations);
+    }
+    for (let index = shared; index < draft.length; index++) {
+      operations.push({ op: "add-array", document, path, value: draft[index] });
+    }
+    for (let index = base.length - 1; index >= draft.length; index--) {
+      operations.push({ op: "delete-array", document, path, index });
+    }
+    return;
+  }
+  if (isPlainObject(base) && isPlainObject(draft)) {
+    for (const key of Object.keys(base)) {
+      diffDocumentValue(base[key], draft[key], childPath(key), document, operations);
+    }
+    for (const key of Object.keys(draft)) {
+      if (!(key in base)) operations.push({ op: "set-field", document, path: childPath(key), value: draft[key] });
+    }
+    return;
+  }
+  if (base !== draft) {
+    operations.push({ op: "set-field", document, path, value: draft });
+  }
 }
 
 export function addDocumentOperation(value: Record<string, unknown>) {
@@ -162,6 +188,56 @@ export function applyDocumentOperation(documents: Record<string, unknown>[], ope
     }
   }
   return next;
+}
+
+export function applyArrayOperation(documents: Record<string, unknown>[], operation: Record<string, unknown>) {
+  const next = documents.map(item => structuredClone(item));
+  const target = next[Number(operation.document ?? 0)];
+  if (!target || typeof operation.path !== "string" || operation.path === "") return next;
+  let container: unknown = target;
+  for (const segment of operation.path.split(".")) {
+    if (Array.isArray(container)) container = container[Number(segment)];
+    else if (isPlainObject(container)) container = container[segment];
+    else return next;
+  }
+  if (!Array.isArray(container)) return next;
+  switch (String(operation.op)) {
+    case "add-array":
+      container.push(structuredClone(operation.value));
+      break;
+    case "copy-array": {
+      const index = Number(operation.index);
+      if (index >= 0 && index < container.length) container.splice(index + 1, 0, structuredClone(container[index]));
+      break;
+    }
+    case "delete-array": {
+      const index = Number(operation.index);
+      if (index >= 0 && index < container.length) container.splice(index, 1);
+      break;
+    }
+    case "move-array": {
+      const from = Number(operation.from);
+      const to = Number(operation.to);
+      if (from >= 0 && from < container.length && to >= 0 && to < container.length) {
+        const [item] = container.splice(from, 1);
+        container.splice(to, 0, item);
+      }
+      break;
+    }
+  }
+  return next;
+}
+
+export function pendingOperations(baseDocuments: Record<string, unknown>[], documentOperationsList: Record<string, unknown>[], workingDocuments: Record<string, unknown>[]) {
+  const staged = documentOperationsList.reduce<Record<string, unknown>[]>(
+    (documents, operation) => applyDocumentOperation(documents, operation as DocumentOperation),
+    baseDocuments ?? [],
+  );
+  const operations: Record<string, unknown>[] = [...documentOperationsList];
+  workingDocuments.forEach((document, index) => {
+    if (index < staged.length) operations.push(...documentOperations(staged[index] ?? {}, document ?? {}, index));
+  });
+  return operations;
 }
 
 export function addArrayOperation(document: number, path: string, value: unknown) {
@@ -219,8 +295,9 @@ export function App() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
   const [name, setName] = useState("");
   const [opened, setOpened] = useState<OpenConfig | null>(null);
+  const [working, setWorking] = useState<Record<string, unknown>[]>([]);
+  const [pendingDocumentOperations, setPendingDocumentOperations] = useState<Record<string, unknown>[]>([]);
   const [document, setDocument] = useState(0);
-  const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [dirty, setDirty] = useState(false);
   const [review, setReview] = useState<{ diff: string; yaml: string; valid: boolean; errors: string[] } | null>(null);
   const [backupDiff, setBackupDiff] = useState("");
@@ -234,14 +311,39 @@ export function App() {
     return () => removeEventListener("beforeunload", guard);
   }, [dirty]);
 
+  const draft = working[document] ?? {};
+
+  async function load(next: string) {
+    const value = await getConfig(next) as OpenConfig;
+    setName(next); setOpened(value);
+    setWorking(value.documents.map(item => structuredClone(item)));
+    setPendingDocumentOperations([]);
+    setDocument(0); setDirty(false); setReview(null);
+  }
+
   async function open(next: string) {
     if (dirty && !confirm("Discard unsaved changes?")) return;
-    const value = await getConfig(next) as OpenConfig;
-    setName(next); setOpened(value); setDocument(0); setDraft(value.documents[0] ?? {}); setDirty(false); setReview(null); setMessage("");
+    await load(next);
+    setMessage("");
   }
 
   function operations() {
-    return documentOperations(draft, document);
+    return pendingOperations(opened?.documents ?? [], pendingDocumentOperations, working);
+  }
+
+  function handleEditorOperation(operation: Record<string, unknown>) {
+    if (!opened) return;
+    const kind = String(operation.op ?? "");
+    if (kind.endsWith("-document")) {
+      const next = applyDocumentOperation(working, operation as DocumentOperation);
+      setPendingDocumentOperations([...pendingDocumentOperations, operation]);
+      setWorking(next);
+      setDocument(current => Math.min(current, Math.max(0, next.length - 1)));
+    } else if (kind.endsWith("-array")) {
+      setWorking(applyArrayOperation(working, operation));
+    }
+    setDirty(true);
+    setReview(null);
   }
 
   async function prepareSave() {
@@ -254,7 +356,7 @@ export function App() {
     if (!opened || !review?.valid || !confirm("Save these reviewed changes?")) return;
     try {
       await saveConfig(name, { version: opened.version, confirmed: true, operations: operations() });
-      await open(name); setMessage("Saved.");
+      await load(name); setMessage("Saved.");
     } catch (error) {
       setMessage(String(error).includes("409") ? "The file changed on disk. Reload before saving." : String(error));
     }
@@ -291,29 +393,20 @@ export function App() {
       <div className="file-actions"><button disabled={!opened} onClick={() => name && renameConfig(name, name)}>Rename</button><button disabled={!opened} onClick={() => name && copyConfig(name, `copy-${name}`)}>Copy</button><button disabled={!opened} onClick={() => name && exportDownload(name)}>Export</button><button disabled={!opened} onClick={showBackup}>Backup</button><button disabled={!opened} onClick={() => name && deleteConfig(name)}>Delete</button></div>
       {trash.length > 0 && <section aria-label="Trash entries">{trash.map(entry => <div key={entry.id}><span>{entry.original}</span><button onClick={() => restoreTrashEntry(entry.id)}>Restore {entry.original}</button></div>)}</section>}
       <ul>{configs.map(config => <li key={config.name}><button onClick={() => open(config.name)}>{config.name}</button><small>{config.documents} docs · {config.valid ? "valid" : "invalid"}</small></li>)}</ul>
-      {opened && <nav>{opened.documents.map((_, index) => <button key={index} onClick={() => { if (!dirty || confirm("Discard unsaved changes?")) { setDocument(index); setDraft(opened.documents[index]); setDirty(false); } }}>Configuration {index + 1}</button>)}</nav>}
+      {opened && <nav>{working.map((_, index) => <button key={index} onClick={() => { if (!dirty || confirm("Discard unsaved changes?")) { setDocument(index); setDirty(false); } }}>Configuration {index + 1}</button>)}</nav>}
     </aside>
     <section>
       {message && <p role="status">{message}</p>}
       <EditorControls
-        documents={opened?.documents ?? []}
+        documents={working}
         activeDocument={document}
         warnings={opened?.warnings ?? []}
-        onOperation={operation => {
-          if (!opened) return;
-          const documents = applyDocumentOperation(opened.documents, operation as DocumentOperation);
-          const activeDocument = Math.min(document, Math.max(0, documents.length - 1));
-          setOpened({ ...opened, documents });
-          setDocument(activeDocument);
-          setDraft(documents[activeDocument] ?? {});
-          setDirty(true);
-          setReview(null);
-        }}
+        onOperation={handleEditorOperation}
       />
       {!opened ? <h2>Select a YAML configuration</h2> : <>
         <header><h2>{name}</h2><button disabled={!dirty} onClick={prepareSave}>Review changes</button></header>
         {opened.warnings.map((warning, index) => <p className="warning" key={index}>{warning.path}: {warning.message}</p>)}
-        <Form schema={opened.schema} uiSchema={opened.uiSchema} formData={draft} validator={validator} liveValidate={false} onChange={event => { setDraft(event.formData); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
+        <Form schema={opened.schema} uiSchema={opened.uiSchema} formData={draft} validator={validator} liveValidate={false} onChange={event => { const next = event.formData ?? {}; setWorking(current => current.map((item, index) => index === document ? next : item)); setDirty(true); setReview(null); }} onSubmit={prepareSave}><button type="submit">Review changes</button></Form>
         <details><summary>Read-only YAML</summary><pre>{opened.yaml.source}</pre></details>
         {backupDiff && <section className="backup"><h3>Backup review</h3><pre>{backupDiff}</pre><button onClick={restoreOpenedBackup}>Restore backup</button></section>}
         {review && <section className="review"><h3>Save review</h3>{review.errors.map(error => <p className="error" key={error}>{error}</p>)}<pre>{review.diff}</pre><button disabled={!review.valid} onClick={save}>Confirm save</button></section>}

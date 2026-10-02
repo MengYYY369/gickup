@@ -340,6 +340,283 @@ func TestWebUIEditorDeletesNestedOptionalFieldLosslessly(t *testing.T) {
 	}
 }
 
+func TestWebUIEditorSetsScalarValueLosslessly(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("# keep\ncron: '@daily' # trailing\nsource:\n  any:\n    - url: 'https://one.test'\n      future: keep-me\n")
+	if err := os.WriteFile(filepath.Join(dir, "set.yml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	body := `{"version":"` + hex.EncodeToString(sum[:]) + `","confirmed":true,"operations":[{"op":"set-field","document":0,"path":"cron","value":"@hourly"}]}`
+	r := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/configs/set.yml", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusOK {
+		t.Fatalf("set-field status = %d: %s", r.Code, r.Body.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "set.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Cron string `yaml:"cron"`
+	}
+	if err := yaml.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("saved YAML does not decode: %v: %s", err, got)
+	}
+	if decoded.Cron != "@hourly" {
+		t.Fatalf("cron = %q, want @hourly: %s", decoded.Cron, got)
+	}
+	for _, want := range []string{"# keep", "# trailing", "future: keep-me", "url: 'https://one.test'"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Fatalf("saved YAML lost %q: %s", want, got)
+		}
+	}
+}
+
+func TestWebUIEditorCreatesMissingFieldsInOrder(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("cron: '@daily'\nsource:\n  any:\n    - url: https://one.test\n")
+	path := filepath.Join(dir, "create.yml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	body := `{"version":"` + hex.EncodeToString(sum[:]) + `","confirmed":true,"operations":[` +
+		`{"op":"set-field","document":0,"path":"source.any.0.url","value":"https://two.test"},` +
+		`{"op":"set-field","document":0,"path":"source.any.0.username","value":"alpha"},` +
+		`{"op":"set-field","document":0,"path":"source.any.0.retries","value":3},` +
+		`{"op":"set-field","document":0,"path":"metrics.listen_addr","value":"127.0.0.1:2112"}]}`
+	r := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/configs/create.yml", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusOK {
+		t.Fatalf("set-field status = %d: %s", r.Code, r.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	for _, want := range []string{"url: https://two.test", "username: alpha", "retries: 3\n", "metrics:", "listen_addr: 127.0.0.1:2112", "cron: '@daily'"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("saved YAML lost %q: %s", want, text)
+		}
+	}
+	if strings.Index(text, "url: https://two.test") > strings.Index(text, "username: alpha") || strings.Index(text, "username: alpha") > strings.Index(text, "retries: 3") {
+		t.Fatalf("new fields were not appended in operation order: %s", text)
+	}
+	for _, key := range []string{"url:", "username:", "retries:"} {
+		if strings.Count(text, key) != 1 {
+			t.Fatalf("key %q appears %d times: %s", key, strings.Count(text, key), text)
+		}
+	}
+}
+
+func applySetFieldOperations(t *testing.T, dir, name string, raw []byte, operations string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	body := `{"version":"` + hex.EncodeToString(sum[:]) + `","confirmed":true,"operations":[` + operations + `]}`
+	r := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/configs/"+name, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusOK {
+		t.Fatalf("set-field status = %d: %s", r.Code, r.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(got)
+}
+
+func TestWebUIEditorCreatesNestedFieldsInEmptyValues(t *testing.T) {
+	dir := t.TempDir()
+	text := applySetFieldOperations(t, dir, "empty-value.yml", []byte("metrics:\ncron: '@daily'\n"),
+		`{"op":"set-field","document":0,"path":"metrics.listen_addr","value":"127.0.0.1:2112"}`)
+	if !strings.Contains(text, "metrics:\n  listen_addr: 127.0.0.1:2112") {
+		t.Fatalf("nested field was not indented under the empty value: %s", text)
+	}
+	if !strings.Contains(text, "cron: '@daily'") {
+		t.Fatalf("unrelated field changed: %s", text)
+	}
+	var decoded struct {
+		Metrics map[string]string `yaml:"metrics"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &decoded); err != nil || decoded.Metrics["listen_addr"] != "127.0.0.1:2112" {
+		t.Fatalf("saved YAML does not decode to the nested value: %v: %s", err, text)
+	}
+}
+
+func TestWebUIEditorReplacesValueWithNestedMapping(t *testing.T) {
+	dir := t.TempDir()
+	text := applySetFieldOperations(t, dir, "replace-object.yml", []byte("metrics:\ncron: '@daily'\n"),
+		`{"op":"set-field","document":0,"path":"metrics","value":{"listen_addr":"127.0.0.1:2112"}}`)
+	if !strings.Contains(text, "metrics:\n  listen_addr: 127.0.0.1:2112") {
+		t.Fatalf("replacement mapping was not indented: %s", text)
+	}
+	var decoded struct {
+		Metrics map[string]string `yaml:"metrics"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &decoded); err != nil || decoded.Metrics["listen_addr"] != "127.0.0.1:2112" {
+		t.Fatalf("saved YAML does not decode to the replacement value: %v: %s", err, text)
+	}
+}
+
+func TestWebUIEditorWritesIntegersWithoutFloatSuffix(t *testing.T) {
+	dir := t.TempDir()
+	text := applySetFieldOperations(t, dir, "integer.yml", []byte("destination:\n  local:\n    - path: /backup\n      keep: 5\n"),
+		`{"op":"set-field","document":0,"path":"destination.local.0.keep","value":7}`)
+	if !strings.Contains(text, "keep: 7\n") || strings.Contains(text, "keep: 7.0") {
+		t.Fatalf("integer save kept a float suffix: %s", text)
+	}
+}
+
+func TestWebUIEditorKeepsFlowMappingsValid(t *testing.T) {
+	dir := t.TempDir()
+	text := applySetFieldOperations(t, dir, "flow.yml", []byte("metrics: {}\ncron: '@daily'\n"),
+		`{"op":"set-field","document":0,"path":"metrics.listen_addr","value":"127.0.0.1:2112"}`)
+	var decoded struct {
+		Metrics struct {
+			ListenAddr string `yaml:"listen_addr"`
+		} `yaml:"metrics"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &decoded); err != nil || decoded.Metrics.ListenAddr != "127.0.0.1:2112" {
+		t.Fatalf("flow mapping edit did not stay valid: %v: %s", err, text)
+	}
+	if !strings.Contains(text, "cron: '@daily'") {
+		t.Fatalf("unrelated field changed: %s", text)
+	}
+}
+
+func TestWebUIEditorSetsValueInSelectedDocument(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("cron: '@daily'\n---\ncron: '@weekly'\n")
+	path := filepath.Join(dir, "multi-set.yml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	body := `{"version":"` + hex.EncodeToString(sum[:]) + `","confirmed":true,"operations":[{"op":"set-field","document":1,"path":"cron","value":"@monthly"}]}`
+	r := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/configs/multi-set.yml", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusOK {
+		t.Fatalf("set-field status = %d: %s", r.Code, r.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(got))
+	var documents []struct {
+		Cron string `yaml:"cron"`
+	}
+	for {
+		var document struct {
+			Cron string `yaml:"cron"`
+		}
+		err := decoder.Decode(&document)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		documents = append(documents, document)
+	}
+	if len(documents) != 2 || documents[0].Cron != "@daily" || documents[1].Cron != "@monthly" {
+		t.Fatalf("documents = %#v, want untouched first document and updated second: %s", documents, got)
+	}
+}
+
+func TestWebUIReviewShowsSetFieldDraft(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("# keep\ncron: '@daily'\n")
+	path := filepath.Join(dir, "review-set.yml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	body := `{"version":"` + hex.EncodeToString(sum[:]) + `","operations":[{"op":"set-field","document":0,"path":"cron","value":"@hourly"}]}`
+	r := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/configs/review-set.yml/review", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusOK {
+		t.Fatalf("review status=%d body=%q", r.Code, r.Body.String())
+	}
+	var response struct {
+		Diff  string `json:"diff"`
+		Valid bool   `json:"valid"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Valid || !strings.Contains(response.Diff, "-cron: '@daily'") || !strings.Contains(response.Diff, `+cron: "@hourly"`) {
+		t.Fatalf("review response=%#v", response)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, raw) {
+		t.Fatalf("review wrote config: got %q want %q", got, raw)
+	}
+}
+
+func TestWebUIEditorRejectsUnsafeSetFieldPaths(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("cron: '@daily'\nsource:\n  any:\n    - url: https://one.test\n      future: keep-me\n")
+	path := filepath.Join(dir, "unsafe-set.yml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newWebUIHandler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	for _, fieldPath := range []string{"", "cron.value", "source.any.5.url", "source.any.0.future.deep"} {
+		body := `{"version":"` + hex.EncodeToString(sum[:]) + `","confirmed":true,"operations":[{"op":"set-field","document":0,"path":"` + fieldPath + `","value":"x"}]}`
+		r := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/configs/unsafe-set.yml", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(r, req)
+		if r.Code < 400 {
+			t.Fatalf("set-field path %q status = %d, want rejection", fieldPath, r.Code)
+		}
+		got, _ := os.ReadFile(path)
+		if !bytes.Equal(got, raw) {
+			t.Fatalf("rejected set-field path %q changed file: %q", fieldPath, got)
+		}
+	}
+}
+
 func TestWebUIHandlerListsAndOpensRootConfigs(t *testing.T) {
 	dir := t.TempDir()
 	yamlBytes := []byte("cron: '0 0 * * *'\nsource:\n  future_hoster:\n    custom: keep-me\n")
