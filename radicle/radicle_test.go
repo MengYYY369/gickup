@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,8 +15,13 @@ func TestHome(t *testing.T) {
 	// Home delegates to `rad self --home`; stub rad and check we return what
 	// it reports, verbatim.
 	bin := t.TempDir()
+	name := "rad"
 	script := "#!/bin/sh\n[ \"$1 $2\" = \"self --home\" ] && echo /stub/radhome\n"
-	if err := os.WriteFile(filepath.Join(bin, "rad"), []byte(script), 0o755); err != nil {
+	if runtime.GOOS == "windows" {
+		name = "rad.bat"
+		script = "@echo off\r\nif \"%1 %2\"==\"self --home\" echo /stub/radhome\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fmt.Sprintf("%s%c%s", bin, os.PathListSeparator, os.Getenv("PATH")))
@@ -103,29 +109,45 @@ func fakeRad(t *testing.T, radhome string, repos map[string]fakePayload) {
 	ourDID := "did:key:" + testNID
 
 	var payloadCases, delegateCases string
+	var payloadBatch, delegateBatch string
 	for rid, p := range repos {
 		gickup := ""
 		if p.source != "" {
 			gickup = fmt.Sprintf("\"dev.gickup\": {\"source\": \"%s\"}, ", p.source)
 		}
-		payloadCases += fmt.Sprintf("rad:%s) echo '{%s\"xyz.radicle.project\": {\"name\": \"%s\", \"defaultBranch\": \"main\"}}' ;;\n", rid, gickup, p.name)
+		payloadJSON := fmt.Sprintf("{%s\"xyz.radicle.project\": {\"name\": \"%s\", \"defaultBranch\": \"main\"}}", gickup, p.name)
+		payloadCases += fmt.Sprintf("rad:%s) echo '%s' ;;\n", rid, payloadJSON)
+		payloadBatch += fmt.Sprintf("if \"%%2\"==\"rad:%s\" echo %s\r\nif \"%%2\"==\"rad:%s\" exit /b 0\r\n", rid, payloadJSON, rid)
 
 		delegate := "did:key:zForeignNode"
 		if p.owned {
 			delegate = ourDID
 		}
 		delegateCases += fmt.Sprintf("rad:%s) echo '%s (alias)' ;;\n", rid, delegate)
+		delegateBatch += fmt.Sprintf("if \"%%2\"==\"rad:%s\" echo %s (alias)\r\nif \"%%2\"==\"rad:%s\" exit /b 0\r\n", rid, delegate, rid)
 	}
 
-	script := "#!/bin/sh\n" +
-		"if [ \"$1 $2\" = \"self --home\" ]; then echo \"$RAD_HOME\"; exit 0; fi\n" +
-		"case \"$3\" in\n" +
-		"--payload) case \"$2\" in\n" + payloadCases + "*) echo 'unknown repository' >&2; exit 1 ;;\nesac ;;\n" +
-		"--delegates) case \"$2\" in\n" + delegateCases + "*) echo 'unknown repository' >&2; exit 1 ;;\nesac ;;\n" +
-		"esac\n"
-
-	if err := os.WriteFile(filepath.Join(bin, "rad"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS == "windows" {
+		script := "@echo off\r\n" +
+			"if \"%1 %2\"==\"self --home\" (\r\n  echo %RAD_HOME%\r\n  exit /b 0\r\n)\r\n" +
+			"if \"%3\"==\"--payload\" goto payload\r\n" +
+			"if \"%3\"==\"--delegates\" goto delegates\r\n" +
+			"exit /b 1\r\n" +
+			":payload\r\n" + payloadBatch + "echo unknown repository 1>&2\r\nexit /b 1\r\n" +
+			":delegates\r\n" + delegateBatch + "echo unknown repository 1>&2\r\nexit /b 1\r\n"
+		if err := os.WriteFile(filepath.Join(bin, "rad.bat"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		script := "#!/bin/sh\n" +
+			"if [ \"$1 $2\" = \"self --home\" ]; then echo \"$RAD_HOME\"; exit 0; fi\n" +
+			"case \"$3\" in\n" +
+			"--payload) case \"$2\" in\n" + payloadCases + "*) echo 'unknown repository' >&2; exit 1 ;;\nesac ;;\n" +
+			"--delegates) case \"$2\" in\n" + delegateCases + "*) echo 'unknown repository' >&2; exit 1 ;;\nesac ;;\n" +
+			"esac\n"
+		if err := os.WriteFile(filepath.Join(bin, "rad"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	t.Setenv("PATH", fmt.Sprintf("%s%c%s", bin, os.PathListSeparator, os.Getenv("PATH")))
