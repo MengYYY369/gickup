@@ -43,7 +43,7 @@ func Zip(repository string, tozip []string) error {
 		if err != nil {
 			return err
 		}
-		f, err := w.Create(abspath)
+		f, err := w.Create(filepath.ToSlash(abspath))
 		if err != nil {
 			return err
 		}
